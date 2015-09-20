@@ -1,9 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 
-import           Database.MySQL.Simple
-import           Database.MySQL.Simple.QueryResults
-import           Database.MySQL.Simple.Result
+--import           Database.MySQL.Simple
+--import           Database.MySQL.Simple.QueryResults
+--import           Database.MySQL.Simple.Result
 
 import           Control.Lens                       hiding ((.=))
 import Control.Concurrent ( threadDelay )
@@ -11,6 +11,7 @@ import Control.Monad
 
 import qualified Data.Text                          as T
 import           Data.Aeson
+import qualified Data.Map                           as M
 import qualified Data.ByteString.Char8              as C8
 import qualified Data.ByteString.Lazy               as BL
 import           Network.Wreq
@@ -18,24 +19,34 @@ import           Network.Wreq
 import           Haskakafka
 import           Haskakafka.InternalRdKafkaEnum
 
-data CampaignInfo = CampaignInfo { cid :: Int,
-                                   src :: T.Text,
-                                   mpd :: Maybe T.Text
-                                 } deriving (Show)
+data CampaignTopicMessage = CampaignTopicMessage { id :: Int,
+                                                   source :: T.Text
+                                                 } deriving (Show)
 
+instance FromJSON CampaignTopicMessage where
+ parseJSON (Object v) =
+    CampaignTopicMessage <$> v .: "id"
+                         <*> v .: "source"
+ parseJSON _ = mzero
 
-instance QueryResults CampaignInfo where
-    convertResults [fa,fb,fc] [va,vb,vc] =
-            CampaignInfo a b c
-        where a = convert fa va
-              b = convert fb vb
-              c = convert fc vc
-    convertResults fs vs  = convertError fs vs 3
-
-
-findCampaignInfo :: Connection -> IO [CampaignInfo]
-findCampaignInfo conn = query_ conn
-        "select c.id, m.src, m.mpd_url from campaign c left join media m on m.id = c.media_id"
+--data CampaignInfo = CampaignInfo { cid :: Int,
+--                                   src :: T.Text,
+--                                   mpd :: Maybe T.Text
+--                                 } deriving (Show)
+--
+--
+--instance QueryResults CampaignInfo where
+--    convertResults [fa,fb,fc] [va,vb,vc] =
+--            CampaignInfo a b c
+--        where a = convert fa va
+--              b = convert fb vb
+--              c = convert fc vc
+--    convertResults fs vs  = convertError fs vs 3
+--
+--
+--findCampaignInfo :: Connection -> IO [CampaignInfo]
+--findCampaignInfo conn = query_ conn
+--        "select c.id, m.src, m.mpd_url from campaign c left join media m on m.id = c.media_id"
 
 api :: String -> String
 api s = "http://portal.bitcodin.com/api/" ++ s
@@ -48,14 +59,32 @@ createInput src = do
     let payload = encode $ object ["inputType" .= ("url" :: T.Text), "url" .= src]
     postWith opts (api "/input/create") payload
 
+decodeCTPayload :: C8.ByteString -> Maybe CampaignTopicMessage
+decodeCTPayload p = decode $ BL.fromStrict p
+
+consume :: KafkaTopic -> Int -> IO ()
+consume topic partition = do
+    let timeoutMs = 1000
+    me <- consumeMessage topic partition timeoutMs
+    case me of
+      (Left err) -> case err of
+                      KafkaResponseError RdKafkaRespErrTimedOut -> return ()
+                      _                      -> putStrLn $ "[ERROR] " ++ (show err)
+      (Right m) -> do
+          print $ BL.fromStrict $ messagePayload m
+          case decodeCTPayload $ messagePayload m of
+            Nothing -> return ()
+            Just m -> do
+              r <- createInput $ source m
+              putStrLn $ show r
 
 main :: IO ()
 main = do
-  conn <- connect defaultConnectInfo {  connectPassword = "password",
-                                        connectDatabase = "plads"
-                                     }
-  c <- findCampaignInfo conn
-  let srcs = map src $ filter (\x -> mpd x == Nothing) c
+--  conn <- connect defaultConnectInfo {  connectPassword = "password",
+--                                        connectDatabase = "plads"
+--                                     }
+--  c <- findCampaignInfo conn
+--  let srcs = map src $ filter (\x -> mpd x == Nothing) c
 
   let partition = 0
       host = "localhost:9092"
@@ -66,16 +95,9 @@ main = do
                     host topic
                     partition
                     KafkaOffsetStored
-                    $ \kafka topic -> do
-  forever $ do
-      let timeoutMs = 1000
-      me <- consumeMessage topic partition timeoutMs
-      case me of
-        (Left err) -> case err of
-                        KafkaResponseError RdKafkaRespErrTimedOut -> return ()
-                        _                      -> putStrLn $ "[ERROR] " ++ (show err)
-        (Right m) -> putStrLn $ "Woo, payload was " ++ (C8.unpack $ messagePayload m)
-      threadDelay 1000000
+                    $ \kafka topic -> forever $ do
+  consume topic partition
+  threadDelay 1000000
 
 
   --r <- mapM createInput srcs
