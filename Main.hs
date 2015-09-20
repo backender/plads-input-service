@@ -1,65 +1,41 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-import           Control.Monad
 
 import           Database.MySQL.Simple
 import           Database.MySQL.Simple.QueryResults
 import           Database.MySQL.Simple.Result
 
-import           Data.DateTime
-import qualified Data.Text                          as T
-
 import           Control.Lens                       hiding ((.=))
+import Control.Concurrent ( threadDelay )
+import Control.Monad
+
+import qualified Data.Text                          as T
 import           Data.Aeson
+import qualified Data.ByteString.Char8              as C8
 import qualified Data.ByteString.Lazy               as BL
 import           Network.Wreq
 
-data User = User { uid      :: Int,
-                   active   :: Int,
-                   salt     :: T.Text,
-                   email    :: T.Text,
-                   password :: T.Text,
-                   roles    :: Maybe T.Text
-                  } deriving (Show)
+import           Haskakafka
+import           Haskakafka.InternalRdKafkaEnum
 
-data CampaignInfo = CampaignInfo { cid     :: Int,
-                                   display :: Int,
-                                   start   :: DateTime,
-                                   end     :: DateTime,
-                                   src     :: T.Text,
-                                   mpd     :: Maybe T.Text
+data CampaignInfo = CampaignInfo { cid :: Int,
+                                   src :: T.Text,
+                                   mpd :: Maybe T.Text
                                  } deriving (Show)
 
 
-instance QueryResults User where
-    convertResults [fa,fb,fc,fd,fe,ff] [va,vb,vc,vd,ve,vf] =
-            User id active salt email password roles
-        where id = convert fa va
-              active = convert fb vb
-              salt = convert fc vc
-              email = convert fd vd
-              password = convert fe ve
-              roles = convert ff vf
-    convertResults fs vs  = convertError fs vs 6
-
 instance QueryResults CampaignInfo where
-    convertResults [fa,fb,fc,fd,fe,ff] [va,vb,vc,vd,ve,vf] =
-            CampaignInfo cid display start end src mpd
-        where cid = convert fa va
-              display = convert fb vb
-              start = convert fc vc
-              end = convert fd vd
-              src = convert fe ve
-              mpd = convert ff vf
-    convertResults fs vs  = convertError fs vs 6
+    convertResults [fa,fb,fc] [va,vb,vc] =
+            CampaignInfo a b c
+        where a = convert fa va
+              b = convert fb vb
+              c = convert fc vc
+    convertResults fs vs  = convertError fs vs 3
 
-
-findAllUser :: Connection -> IO [User]
-findAllUser conn = query_ conn "select * from user"
 
 findCampaignInfo :: Connection -> IO [CampaignInfo]
 findCampaignInfo conn = query_ conn
-        "select c.id, c.display_id, c.start, c.end, m.src, m.mpd_url from campaign c left join media m on m.id = c.media_id"
+        "select c.id, m.src, m.mpd_url from campaign c left join media m on m.id = c.media_id"
 
 api :: String -> String
 api s = "http://portal.bitcodin.com/api/" ++ s
@@ -75,17 +51,34 @@ createInput src = do
 
 main :: IO ()
 main = do
-  conn <- connect defaultConnectInfo {
-                                        connectPassword = "password",
+  conn <- connect defaultConnectInfo {  connectPassword = "password",
                                         connectDatabase = "plads"
                                      }
-  --users <- findAllUser conn
-  --putStrLn $ show users
-
   c <- findCampaignInfo conn
   let srcs = map src $ filter (\x -> mpd x == Nothing) c
 
-  r <- mapM createInput srcs
-  print r
+  let partition = 0
+      host = "localhost:9092"
+      topic = "test"
+      kafkaConfig = []
+      topicConfig = []
+  withKafkaConsumer kafkaConfig topicConfig
+                    host topic
+                    partition
+                    KafkaOffsetStored
+                    $ \kafka topic -> do
+  forever $ do
+      let timeoutMs = 1000
+      me <- consumeMessage topic partition timeoutMs
+      case me of
+        (Left err) -> case err of
+                        KafkaResponseError RdKafkaRespErrTimedOut -> return ()
+                        _                      -> putStrLn $ "[ERROR] " ++ (show err)
+        (Right m) -> putStrLn $ "Woo, payload was " ++ (C8.unpack $ messagePayload m)
+      threadDelay 1000000
+
+
+  --r <- mapM createInput srcs
+  --print r
 
   return ()
