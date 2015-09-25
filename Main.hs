@@ -4,8 +4,10 @@ import Control.Lens                                 hiding ( (.=) )
 import Control.Concurrent ( threadDelay )
 import Control.Monad
 
-import qualified Data.Text                          as T
 import           Data.Aeson
+import           Data.Aeson.Lens (key, nth)
+import           Data.Maybe
+import qualified Data.Text                          as T
 import qualified Data.Map                           as M
 import qualified Data.ByteString.Char8              as C8
 import qualified Data.ByteString.Lazy               as BL
@@ -18,11 +20,18 @@ data CampaignTopicMessage = CampaignTopicMessage { id :: Int,
                                                    src :: T.Text
                                                  } deriving (Show)
 
+data CreateInputResponse = CreateInputResponse { inputId :: Maybe Value, --TODO: types!
+                                                 status :: Maybe Value,
+                                                 thumbnailUrl :: Maybe Value
+                                                 --type :: Maybe T.Text
+                                               } deriving (Show)
+
 instance FromJSON CampaignTopicMessage where
  parseJSON (Object v) =
     CampaignTopicMessage <$> v .: "id"
                          <*> v .: "src"
  parseJSON _ = mzero
+
 
 api :: String -> String
 api s = "http://portal.bitcodin.com/api/" ++ s
@@ -53,8 +62,25 @@ handleConsume e = do
 
 handleResponse :: Response BL.ByteString -> IO ()
 handleResponse r = do
-    putStrLn $ show $ r ^. responseStatus . statusCode
+    case code of
+        201 -> do
+          print $ fromJust $ status inputResponse
+          case fromJust $ status inputResponse of
+            "CREATED" -> produceInput inputResponse
+            _ -> putStrLn "[ERROR] input was not created"
+        _ -> handleErrorResponse code
+    where
+      code = (r ^. responseStatus . statusCode)
+      rb = \x -> r ^? responseBody . key x
+      inputResponse = CreateInputResponse ( rb "inputId") (rb "status") (rb "thumbnailUrl")
 
+handleErrorResponse :: Int -> IO ()
+handleErrorResponse e = do
+  case e of
+    404 -> putStrLn "Not found."
+
+produceInput :: CreateInputResponse -> IO ()
+produceInput i = putStrLn $ show i
 
 main :: IO ()
 main = do
