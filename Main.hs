@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import Control.Lens                                 hiding ( (.=) )
-import Control.Concurrent ( threadDelay )
+import Control.Concurrent                           ( threadDelay )
 import Control.Monad
 
 import           Data.Aeson
@@ -11,6 +11,7 @@ import qualified Data.Text                          as T
 import qualified Data.Map                           as M
 import qualified Data.ByteString.Char8              as C8
 import qualified Data.ByteString.Lazy               as BL
+
 import           Network.Wreq
 
 import           Haskakafka
