@@ -5,7 +5,7 @@ import Control.Concurrent ( threadDelay )
 import Control.Monad
 
 import           Data.Aeson
-import           Data.Aeson.Lens (key, nth)
+import           Data.Aeson.Lens
 import           Data.Maybe
 import qualified Data.Text                          as T
 import qualified Data.Map                           as M
@@ -20,9 +20,9 @@ data CampaignTopicMessage = CampaignTopicMessage { id :: Int,
                                                    src :: T.Text
                                                  } deriving (Show)
 
-data CreateInputResponse = CreateInputResponse { inputId :: Maybe Value, --TODO: types!
-                                                 status :: Maybe Value,
-                                                 thumbnailUrl :: Maybe Value
+data CreateInputResponse = CreateInputResponse { inputId :: Maybe Integer,
+                                                 status :: Maybe T.Text,
+                                                 thumbnailUrl :: Maybe T.Text
                                                  --type :: Maybe T.Text
                                                } deriving (Show)
 
@@ -32,9 +32,13 @@ instance FromJSON CampaignTopicMessage where
                          <*> v .: "src"
  parseJSON _ = mzero
 
+instance ToJSON CreateInputResponse where
+  toJSON (CreateInputResponse (Just inputId) (Just status) (Just thumb)) =
+      object ["inputId" .= inputId, "status" .= status, "thumbnailUrl" .= thumb]
 
 api :: String -> String
-api s = "http://portal.bitcodin.com/api/" ++ s
+--api s = "http://portal.bitcodin.com/api" ++ s --PROD
+api s = "http://private-anon-b5423cd68-bitcodinrestapi.apiary-mock.com/api" ++ s --MOCK
 
 opts :: Options
 opts = defaults & header "bitcodin-api-key" .~ ["3d03c4648b4b6170e7ad7986b637ddcd26a6053a49eb2aa25ec01961a4dd3e2d"]
@@ -47,40 +51,51 @@ createInput src = do
 decodeCTPayload :: C8.ByteString -> Maybe CampaignTopicMessage
 decodeCTPayload p = decode $ BL.fromStrict p
 
-handleConsume :: Either KafkaError KafkaMessage -> IO ()
+handleConsume :: Either KafkaError KafkaMessage -> IO (Either String CampaignTopicMessage)
 handleConsume e = do
     case e of
       (Left err) -> case err of
-                      KafkaResponseError RdKafkaRespErrTimedOut -> return ()
-                      _                                         -> putStrLn $ "[ERROR] " ++ (show err)
+                      KafkaResponseError RdKafkaRespErrTimedOut -> return $ Left $ "[INFO] " ++ (show err)
+                      _                                         -> return $ Left $ "[ERROR] " ++ (show err)
       (Right m) -> do
           print $ BL.fromStrict $ messagePayload m
           case decodeCTPayload $ messagePayload m of
-            Nothing -> putStrLn "[ERROR] decode campaignInput"
-            Just m -> do
-              handleResponse =<< (createInput $ src m)
+            Nothing -> return $ Left $ "[ERROR] decode campaignInput: " ++ (show $ messagePayload m)
+            Just m -> return $ Right m
 
-handleResponse :: Response BL.ByteString -> IO ()
+handleResponse :: Response BL.ByteString -> IO (Either String CreateInputResponse)
 handleResponse r = do
     case code of
         201 -> do
           print $ fromJust $ status inputResponse
           case fromJust $ status inputResponse of
-            "CREATED" -> produceInput inputResponse
-            _ -> putStrLn "[ERROR] input was not created"
-        _ -> handleErrorResponse code
+            "CREATED" -> return $ Right inputResponse
+            _ -> return $ Left "[ERROR] input was not created"
+        _ -> return $ Left $ handleErrorResponse code
     where
       code = (r ^. responseStatus . statusCode)
-      rb = \x -> r ^? responseBody . key x
-      inputResponse = CreateInputResponse ( rb "inputId") (rb "status") (rb "thumbnailUrl")
+      rb = \x t -> r ^? responseBody . key x . t
+      inputResponse = CreateInputResponse (rb "inputId" _Integer )
+                                          (rb "status" _String)
+                                          (rb "thumbnailUrl" _String)
 
-handleErrorResponse :: Int -> IO ()
+handleErrorResponse :: Int -> String
 handleErrorResponse e = do
   case e of
-    404 -> putStrLn "Not found."
+    404 -> "Not found."
 
-produceInput :: CreateInputResponse -> IO ()
-produceInput i = putStrLn $ show i
+produce :: KafkaProduceMessage -> IO (Maybe KafkaError)
+produce message = do
+  let partition = 0
+      host = "localhost:9092"
+      topic = "campaignInput"
+      kafkaConfig = []
+      topicConfig = []
+  withKafkaProducer kafkaConfig topicConfig
+                    host topic
+                    $ \kafka topic -> do
+  produceMessage topic (KafkaSpecifiedPartition partition) message
+
 
 main :: IO ()
 main = do
@@ -94,9 +109,15 @@ main = do
                       partition
                       KafkaOffsetStored
                       $ \kafka topic -> forever $ do
-    handleConsume =<< consumeMessage topic partition 1000
-    --threadDelay 100000 -- 10 times a second
-
-
-  --r <- mapM createInput srcs
-  --print r
+    c <- handleConsume =<< consumeMessage topic partition 1000
+    case c of
+      Right m -> do
+        resp <- handleResponse =<< (createInput $ src m)
+        case resp of
+          Right input -> do
+            prod <- produce $ KafkaProduceMessage $ BL.toStrict $ encode input
+            case prod of
+              Nothing -> putStrLn "produced"
+              Just e -> putStrLn $ show e
+          Left e -> putStrLn e
+      Left e -> putStrLn e
