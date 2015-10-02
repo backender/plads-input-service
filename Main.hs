@@ -17,11 +17,12 @@ import           Network.Wreq
 import           Haskakafka
 import           Haskakafka.InternalRdKafkaEnum
 
-data CampaignTopicMessage = CampaignTopicMessage { id :: Int,
+data CampaignTopicMessage = CampaignTopicMessage { cid :: Integer,
                                                    src :: T.Text
                                                  } deriving (Show)
 
-data CreateInputResponse = CreateInputResponse { inputId :: Maybe Integer,
+data CreateInputResponse = CreateInputResponse { campaignId :: Integer,
+                                                 inputId :: Maybe Integer,
                                                  status :: Maybe T.Text,
                                                  thumbnailUrl :: Maybe T.Text
                                                  --type :: Maybe T.Text
@@ -34,8 +35,8 @@ instance FromJSON CampaignTopicMessage where
  parseJSON _ = mzero
 
 instance ToJSON CreateInputResponse where
-  toJSON (CreateInputResponse (Just inputId) (Just status) (Just thumb)) =
-      object ["inputId" .= inputId, "status" .= status, "thumbnailUrl" .= thumb]
+  toJSON (CreateInputResponse (campaignId) (Just inputId) (Just status) (Just thumb)) =
+      object ["campaignId" .= campaignId, "inputId" .= inputId, "status" .= status, "thumbnailUrl" .= thumb]
 
 api :: String -> String
 --api s = "http://portal.bitcodin.com/api" ++ s --PROD
@@ -64,19 +65,21 @@ handleConsume e = do
             Nothing -> return $ Left $ "[ERROR] decode campaignInput: " ++ (show $ messagePayload m)
             Just m -> return $ Right m
 
-handleResponse :: Response BL.ByteString -> IO (Either String CreateInputResponse)
-handleResponse r = do
+handleResponse :: Integer -> Response BL.ByteString -> IO (Either String CreateInputResponse)
+handleResponse cid r = do
     case code of
         201 -> do
-          print $ fromJust $ status inputResponse
-          case fromJust $ status inputResponse of
-            "CREATED" -> return $ Right inputResponse
-            _ -> return $ Left "[ERROR] input was not created"
+          case status inputResponse of
+            Just s -> case s of
+              "CREATED" -> return $ Right inputResponse
+              _ -> return $ Left "[ERROR] input was not created"
+            Nothing -> return $ Left "[ERROR] could not determine input status."
         _ -> return $ Left $ handleErrorResponse code
     where
       code = (r ^. responseStatus . statusCode)
       rb = \x t -> r ^? responseBody . key x . t
-      inputResponse = CreateInputResponse (rb "inputId" _Integer )
+      inputResponse = CreateInputResponse (cid)
+                                          (rb "inputId" _Integer )
                                           (rb "status" _String)
                                           (rb "thumbnailUrl" _String)
 
@@ -113,12 +116,12 @@ main = do
     c <- handleConsume =<< consumeMessage topic partition 1000
     case c of
       Right m -> do
-        resp <- handleResponse =<< (createInput $ src m)
+        resp <- (handleResponse (cid m)) =<< (createInput $ src m)
         case resp of
           Right input -> do
             prod <- produce $ KafkaProduceMessage $ BL.toStrict $ encode input
             case prod of
-              Nothing -> putStrLn "produced"
+              Nothing -> putStrLn $ "[INFO] Produced Input: " ++ show input
               Just e -> putStrLn $ show e
           Left e -> putStrLn e
       Left e -> putStrLn e
