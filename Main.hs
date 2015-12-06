@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import Control.Lens                                 hiding ( (.=) )
-import Control.Concurrent                           ( threadDelay )
 import Control.Monad
 import qualified Control.Exception                  as E
 
@@ -9,7 +8,6 @@ import           Data.Aeson
 import           Data.Aeson.Lens
 import           Data.Maybe
 import qualified Data.Text                          as T
-import qualified Data.Map                           as M
 import qualified Data.ByteString.Char8              as C8
 import qualified Data.ByteString.Lazy               as BL
 
@@ -19,19 +17,17 @@ import           Haskakafka
 import           Haskakafka.InternalRdKafkaEnum
 
 import           Database.MySQL.Simple
-import           Database.MySQL.Simple.QueryResults
-import           Database.MySQL.Simple.Result
 
 type MediaId = Int
 
-data CampaignTopicMessage = CampaignTopicMessage { cid :: Integer,
-                                                   src :: T.Text
-                                                 } deriving (Show)
+data NewMediaMessage = NewMediaMessage { nmId :: Integer,
+                                         nmSrc :: T.Text
+                                       } deriving (Show)
 
 data MediaConfig = VideoConfig {} | AudioConfig {}
                    deriving(Show)
 
-data CreateInputResponse = CreateInputResponse { campaignId :: Integer,
+data CreateInputResponse = CreateInputResponse { mediaId :: Integer,
                                                  inputId :: Maybe Integer,
                                                  status :: Maybe T.Text,
                                                  thumbnailUrl :: Maybe T.Text,
@@ -40,16 +36,16 @@ data CreateInputResponse = CreateInputResponse { campaignId :: Integer,
                                                  --mediaConfigurations :: Maybe MediaConfig
                                                } deriving (Show)
 
-instance FromJSON CampaignTopicMessage where
+instance FromJSON NewMediaMessage where
  parseJSON (Object v) =
-    CampaignTopicMessage <$> v .: "id"
-                         <*> v .: "src"
+    NewMediaMessage <$> v .: "id"
+                    <*> v .: "src"
  parseJSON _ = mzero
 
 instance ToJSON CreateInputResponse where
-  toJSON (CreateInputResponse campaignId (Just inputId) (Just status) (Just thumb) _ _) =
+  toJSON (CreateInputResponse mediaId (Just inputId) (Just status) (Just thumb) _ _) =
       object respHeader
-      where respHeader = [ "campaignId" .= campaignId,
+      where respHeader = [ "mediaId" .= mediaId,
                            "inputId" .= inputId,
                            "status" .= status,
                            "thumbnailUrl" .= thumb ]
@@ -66,10 +62,10 @@ createInput src = do
     let payload = encode $ object ["type" .= ("url" :: T.Text), "url" .= src]
     postWith opts (api "/input/create") payload --TODO: handle exception!
 
-decodeCTPayload :: C8.ByteString -> Maybe CampaignTopicMessage
+decodeCTPayload :: C8.ByteString -> Maybe NewMediaMessage
 decodeCTPayload p = decode $ BL.fromStrict p
 
-handleConsume :: Either KafkaError KafkaMessage -> IO (Either String CampaignTopicMessage)
+handleConsume :: Either KafkaError KafkaMessage -> IO (Either String NewMediaMessage)
 handleConsume e =
     case e of
       (Left err) -> case err of
@@ -104,7 +100,7 @@ handleResponse cid r =
 updateMedia :: Connection -> MediaId -> (Integer, T.Text, Integer, T.Text) -> IO ()
 updateMedia conn mediaId (status, thumbnail, duration, mediaType) =
     check =<< E.try (execute conn q args)
-                  where q = "update media set status=?, thumb_url=?, duration=?, type=? where id = (select media_id from campaign where id=?)" :: Query
+                  where q = "update media set status=?, thumb_url=?, duration=?, type=? where id =?" :: Query
                         args = [(T.pack . show) status, thumbnail, (T.pack . show) duration, mediaType, (T.pack . show) mediaId]
                         check (Left (E.SomeException e)) = putStrLn $ "[ERROR] Updating media with id (" ++ show mediaId ++ ") not successfull: " ++ show e
                         check (Right r) = putStrLn $ "[Info] Media with id " ++ show mediaId ++ " successfully updated: " ++ show r
@@ -119,7 +115,7 @@ produce :: KafkaProduceMessage -> IO (Maybe KafkaError)
 produce message = do
   let partition = 0
       host = "localhost:9092"
-      topic = "campaignInput"
+      topic = "mediaInput"
       kafkaConfig = []
       topicConfig = []
   withKafkaProducer kafkaConfig topicConfig
@@ -137,7 +133,7 @@ main = do
 
     let partition = 0
         host = "localhost:9092"
-        topic = "campaignRequest"
+        topic = "newMedia"
         kafkaConfig = []
         topicConfig = []
     withKafkaConsumer kafkaConfig topicConfig
@@ -147,13 +143,14 @@ main = do
                       $ \kafka topic -> forever $ do
     c <- handleConsume =<< consumeMessage topic partition 1000
     case c of
-      Right m -> do
-        inputResponse <- createInput (src m)
-        let campaignId = cid m
-        respHandle <- handleResponse campaignId inputResponse
+      Right newMedia -> do
+        let mediaId = nmId newMedia
+        let mediaSrc = nmSrc newMedia
+        inputResponse <- createInput mediaSrc
+        respHandle <- handleResponse mediaId inputResponse
         case respHandle of
           Right input -> do
-            _ <- updateMedia conn (fromIntegral campaignId) (1, fromJust $ thumbnailUrl input, fromJust $ duration input, fromJust $ mediaType input)
+            _ <- updateMedia conn (fromIntegral mediaId) (1, fromJust $ thumbnailUrl input, fromJust $ duration input, fromJust $ mediaType input)
             prod <- produce $ KafkaProduceMessage $ BL.toStrict $ encode input
             case prod of
               Nothing -> putStrLn $ "[INFO] Produced Input: " ++ show input
